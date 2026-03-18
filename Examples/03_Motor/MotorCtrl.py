@@ -14,8 +14,8 @@ Motor_A_Pin2  = 21
 Motor_B_Pin1  = 27
 Motor_B_Pin2  = 18
 
-Dir_forward   = 0
-Dir_backward  = 1
+Dir_forward   = 1
+Dir_backward  = 0
 
 left_forward  = 1
 left_backward = 0
@@ -77,7 +77,7 @@ def destroy():
 
 if __name__ == '__main__':
     try:
-        speed_set = 50
+        speed_set = 40
         setup()
         for i in range(10):
             move(speed_set, 'forward', 'no', 0.8)

@@ -214,7 +214,7 @@ if __name__ == '__main__':
     led = RobotWS2812()
     led.start()
     try:
-        led.breath(128, 124, 128)
+        led.breath(124, 124, 124)
         while True:
             time.sleep(1)
     except KeyboardInterrupt:

@@ -31,11 +31,11 @@ def set_angle(ID, angle):
 def test(channel):
     for i in range(180):  # The servo turns from 0 to 180 degrees.
         set_angle(channel, i)
-        time.sleep(0.01)
+        time.sleep(0.02)
     time.sleep(0.5)
     for i in range(180):  # The servo turns from 180 to 0 degrees.
         set_angle(channel, 180 - i)
-        time.sleep(0.01)
+        time.sleep(0.02)
     time.sleep(0.5)
 
 
