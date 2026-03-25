@@ -1,146 +1,118 @@
-#Controls RoverPi with a gamepad using evdev for input, gpiozero for motor control, and adafruit libraries for servo control.
-#Left analog stick controls forward, backward, and turning.
-#Right analog stick controls up/down, left/right for the camera servos.
-
-#import evdev for gamepad input
 import evdev
 from evdev import InputDevice, ecodes
-
-#import gpiozero for motor control and time
 import time
-from gpiozero import Motor, OutputDevice
-
-#import board and adafruit libraries for servo control
+from gpiozero import Motor
 from board import SCL, SDA
 import busio
 from adafruit_motor import servo
 from adafruit_pca9685 import PCA9685
 
-#Setup servo control
-i2c =busio.I2C(SCL, SDA)
-#Create asimple PCA9685 class instance.
-pca =PCA9685(i2c, address=0x40) #default 0x40
+# --- SETUP SERVO CONTROL ---
+i2c = busio.I2C(SCL, SDA)
+pca = PCA9685(i2c, address=0x40)
 pca.frequency = 50
 
-def set_angle(ID, angle):
-    servo_angle = servo.Servo(pca.channels[ID], min_pulse=500, max_pulse=2400, actuation_range=180)
-    servo_angle.angle = angle
+pan_servo = servo.Servo(pca.channels[0], min_pulse=500, max_pulse=2400, actuation_range=180)
+tilt_servo = servo.Servo(pca.channels[1], min_pulse=500, max_pulse=2400, actuation_range=180)
 
-#Motor Pin Setup
-Motor_A_EN    = 4
-Motor_B_EN    = 17
+# --- CONFIGURATION ---
+# Change this to limit your robot's top speed (0.1 to 1.0)
+# 0.5 means the robot will only ever reach 50% power
+MAX_MOTOR_SPEED = 0.5 
 
-Motor_A_Pin1  = 26
-Motor_A_Pin2  = 21
-Motor_B_Pin1  = 27
-Motor_B_Pin2  = 18
+# Servo Smoothing Variables
+target_pan = 90.0
+target_tilt = 90.0
+current_pan = 90.0
+current_tilt = 90.0
+SMOOTHING_FACTOR = 0.25 
 
-#Motor Object and direction setup
-motor_left = Motor(forward=Motor_B_Pin1, backward=Motor_B_Pin2, enable=Motor_B_EN)
-motor_right = Motor(forward=Motor_A_Pin1, backward=Motor_A_Pin2, enable=Motor_A_EN)
+MIN_ANGLE = 20
+MAX_ANGLE = 160
 
-def motorStop():#Motor stops
+# --- MOTOR PIN SETUP ---
+motor_left = Motor(forward=27, backward=18, enable=17)
+motor_right = Motor(forward=26, backward=21, enable=4)
+
+def motorStop():
     motor_left.stop()
     motor_right.stop()
 
-DEVICE_NAME = "8BitDo Lite 2" 
+# --- CONTROLLER SETUP ---
+DEVICE_NAME = "8BitDo Lite 2"
 DEVICE_PATH = "/dev/input/event4"
 
-#Find input device function
 def find_device():
-    """Helper to find the device by name if the path changes on reconnect."""
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
     for device in devices:
         if DEVICE_NAME in device.name:
             return device.path
     return None
 
-# Track left stick axis states (assuming 0-255 range, 127 center)
 l_axis_states = {'ABS_X': 127, 'ABS_Y': 127}
-
-# Track right stick axis states (assuming 0-255 range, 127 center)
 r_axis_states = {'ABS_Z': 127, 'ABS_RZ': 127}
 
-# Check Bluetooth Controller Connection
+print(f"RoverPi Active. Motor speed limited to {MAX_MOTOR_SPEED*100}%")
+
 while True:
     try:
-        # 1. Attempt to connect
         path = find_device() or DEVICE_PATH
         gamepad = InputDevice(path)
-        print(f"Connected to {gamepad.name}")
+        gamepad.grab()
+        
+        while True:
+            # Drain event backlog
+            while True:
+                event = gamepad.read_one()
+                if event is None: break 
+                
+                if event.type == ecodes.EV_ABS:
+                    if event.code == ecodes.ABS_X: l_axis_states['ABS_X'] = event.value
+                    elif event.code == ecodes.ABS_Y: l_axis_states['ABS_Y'] = event.value
+                    elif event.code == ecodes.ABS_Z: r_axis_states['ABS_Z'] = event.value
+                    elif event.code == ecodes.ABS_RZ: r_axis_states['ABS_RZ'] = event.value
 
-# Main loop to read gamepad input and control motors/servos
+            # 1. Normalize Stick Inputs
+            joy_x = (l_axis_states['ABS_X'] - 127) / 127
+            joy_y = -((l_axis_states['ABS_Y'] - 127) / 127)
+            joy_z = -((r_axis_states['ABS_Z'] - 127) / 127)
+            joy_rz = -((r_axis_states['ABS_RZ'] - 127) / 127)
 
-        for event in gamepad.read_loop():
-            if event.type == ecodes.EV_ABS:
-                # Map specific codes to our state tracker
-                if event.code == ecodes.ABS_X:
-                    l_axis_states['ABS_X'] = event.value
-                elif event.code == ecodes.ABS_Y:
-                    l_axis_states['ABS_Y'] = event.value
-                if event.code == ecodes.ABS_Z:
-                    r_axis_states['ABS_Z'] = event.value
-                elif event.code == ecodes.ABS_RZ:
-                    r_axis_states['ABS_RZ'] = event.value
-                    
-            elif event.type == ecodes.EV_SYN and event.code == ecodes.SYN_REPORT:
-                # Normalize inputs (-1.0 to 1.0)
-                # Note: Often Y is inverted on controllers (up is negative), 
-                # so we multiply by -1 if needed.
-                joy_x = (l_axis_states['ABS_X'] - 127) / 127
-                joy_y = -((l_axis_states['ABS_Y'] - 127) / 127) # Inverting Y for intuitive control
-                joy_z = -((r_axis_states['ABS_Z'] - 127) / 127) # Inverting Z for intuitive control
-                joy_rz = -((r_axis_states['ABS_RZ'] - 127) / 127) # Inverting Y for intuitive control
+            # 2. MOTOR LOGIC (Applying the permanent speed limit)
+            # We calculate raw speed first, then multiply by our limit
+            raw_l = max(min(joy_y + joy_x, 1.0), -1.0)
+            raw_r = max(min(joy_y - joy_x, 1.0), -1.0)
+            
+            l_speed = raw_l * MAX_MOTOR_SPEED
+            r_speed = raw_r * MAX_MOTOR_SPEED
+            
+            # Apply to hardware
+            if abs(l_speed) > 0.05:
+                if l_speed > 0: motor_left.forward(l_speed)
+                else: motor_left.backward(abs(l_speed))
+            else: motor_left.stop()
 
-                # Calculate Drive and Turn
-                # Drive is the forward/backward component
-                # Turn is the left/right component
-                left_speed = joy_y + joy_x
-                right_speed = joy_y - joy_x
+            if abs(r_speed) > 0.05:
+                if r_speed > 0: motor_right.forward(r_speed)
+                else: motor_right.backward(abs(r_speed))
+            else: motor_right.stop()
 
-                # Constrain values to -1.0 to 1.0 range
-                left_speed = max(min(left_speed, 1.0), -1.0)
-                right_speed = max(min(right_speed, 1.0), -1.0)
-                joy_z = max(min(joy_z, 1.0), -1.0)
-                joy_rz = max(min(joy_rz, 1.0), -1.0)
+            # 3. SERVO SMOOTHING
+            target_pan = ((joy_z + 1) / 2 * 180)
+            target_tilt = ((joy_rz + 1) / 2 * 180)
 
-                print(f"Left Speed: {left_speed:.2f}, Right Speed: {right_speed:.2f}")
-                print(f"Camera Pan (Z): {joy_z:.2f}, Camera Tilt (RZ): {joy_rz:.2f}")
+            current_pan += (target_pan - current_pan) * SMOOTHING_FACTOR
+            current_tilt += (target_tilt - current_tilt) * SMOOTHING_FACTOR
 
+            pan_servo.angle = max(min(current_pan, MAX_ANGLE), MIN_ANGLE)
+            tilt_servo.angle = max(min(current_tilt, MAX_ANGLE), MIN_ANGLE)
 
-                # Apply to Left Motor
-                if left_speed > 0:
-                    motor_left.forward(left_speed)
-                elif left_speed < 0:
-                    motor_left.backward(abs(left_speed))
-                else:
-                    motor_left.stop()
-
-                # Apply to Right Motor
-                if right_speed > 0:
-                    motor_right.forward(right_speed)
-                elif right_speed < 0:
-                    motor_right.backward(abs(right_speed))
-                else:
-                    motor_right.stop()
-
-                # Apply to Camera Servos
-                # Assuming joy_z controls pan (servo 0) and joy_rz controls tilt (servo 1)
-                # Map from -1.0 to 1.0 range to 0 to 180 degrees
-                pan_angle = int((joy_z + 1) / 2 * 180)  # Map -1 to 1 -> 180 to 0
-                tilt_angle = int((joy_rz + 1) / 2 * 180) # Map -1 to 1 -> 0 to 180
-                set_angle(0, pan_angle)
-                set_angle(1, tilt_angle)
+            time.sleep(0.02) # 50Hz Update Rate
 
     except (OSError, IOError, FileNotFoundError):
-        # 3. Handle disconnection
-        print("Bluetooth controller lost connection. Waiting to reconnect...")
-        
-        # Optional: Reset motor speeds to zero here for safety
+        print("Controller lost. Reconnecting...")
         motorStop()
-        
-        # Wait before trying to reconnect to save CPU
         time.sleep(3)
     except KeyboardInterrupt:
-        print("\nScript stopped by user.")
+        motorStop()
         break
