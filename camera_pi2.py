@@ -1,15 +1,11 @@
 #!/usr/bin/env/python
-# File name   : camera_pi2.py
-# Website     : www.Adeept.com
-# Author      : Adeept
-# Date        : 2025/03/22
+# File name   : camera_pi2.py
 import io
 import time
 import cv2
-from picamera2 import Picamera2, Preview
+from picamera2 import Picamera2
 import libcamera 
 from base_camera import BaseCamera
-
 
 hflip = 0
 vflip = 0
@@ -19,27 +15,43 @@ class Camera(BaseCamera):
     def frames():
         picam2 = Picamera2() 
         
-        preview_config = picam2.preview_configuration
-        preview_config.size = (640, 480)
-        preview_config.format = 'RGB888'  # 'XRGB8888', 'XBGR8888', 'RGB888', 'BGR888', 'YUV420'
-        preview_config.transform = libcamera.Transform(hflip=hflip, vflip=vflip)
-        preview_config.colour_space = libcamera.ColorSpace.Sycc()
-        preview_config.buffer_count = 4
-        preview_config.queue = True
-        # if not camera.isOpened():
-        if not picam2.is_open:
-            raise RuntimeError('Could not start camera.')
-
         try:
+            # We use Dictionary access here because your library version prefers it
+            config = picam2.create_video_configuration()
+            config['main']['size'] = (640, 480)
+            config['main']['format'] = 'RGB888'
+            
+            # Setting the transform (hflip/vflip)
+            config['transform'] = libcamera.Transform(hflip=hflip, vflip=vflip)
+            
+            picam2.configure(config)
+
+            if not picam2.is_open:
+                raise RuntimeError('Could not start camera.')
+
+            print("[Camera] Powering on sensor...")
             picam2.start()
+
+            while True:
+                img = picam2.capture_array()
+                
+                # Encode to JPEG (50 quality is great for Quest 3 bandwidth)
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 50]
+                result, encimg = cv2.imencode('.jpg', img, encode_param)
+            
+                if result:
+                    yield encimg.tobytes()
+                
+                time.sleep(0)
+
         except Exception as e:
-            print(f"\033[38;5;1mError:\033[0m\n{e}")
-            print("\nPlease check whether the camera is connected well,  \
-                  and disable the \"legacy camera driver\" on raspi-config")
-        while True:
-            start_time = time.time()
-            # read current frame
-            img = picam2.capture_array()
-            if cv2.imencode('.jpg', img)[0]:
-                yield cv2.imencode('.jpg', img)[1].tobytes()
-    
+            print(f"\033[38;5;1m[Camera Error]\033[0m: {e}")
+        
+        finally:
+            print("[Camera] Releasing hardware...")
+            try:
+                picam2.stop()
+                picam2.close()
+                print("[Camera] Hardware state: Available")
+            except:
+                pass
